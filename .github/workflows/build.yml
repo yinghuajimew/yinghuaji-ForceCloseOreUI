@@ -10,6 +10,9 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    outputs:
+      dll_sha: ${{ steps.checksum.outputs.dll_sha }}
+      dll_date: ${{ steps.checksum.outputs.dll_date }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,14 +24,27 @@ jobs:
           xmake f -p windows -m release -v -y
           xmake
 
-      - name: Upload DLL
+      - name: Compute checksum and date
+        id: checksum
+        shell: pwsh
+        run: |
+          $file = Get-Item build/windows/x64/release/*.dll | Select-Object -First 1
+          $sha = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+          $date = $file.LastWriteTimeUtc.ToString("yyyy-MM-dd HH:mm:ss UTC")
+          echo "dll_sha=$sha" >> $env:GITHUB_OUTPUT
+          echo "dll_date=$date" >> $env:GITHUB_OUTPUT
+
+      - name: Upload DLL artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: windows-dll
           path: build/windows/x64/release/*.dll
 
   build-android:
     runs-on: windows-latest
+    outputs:
+      so_sha: ${{ steps.checksum.outputs.so_sha }}
+      so_date: ${{ steps.checksum.outputs.so_date }}
     steps:
       - uses: actions/checkout@v4
 
@@ -43,8 +59,50 @@ jobs:
           xmake f -p android -a arm64-v8a -m release -v -y
           xmake
 
-      - name: Upload SO
+      - name: Compute checksum and date
+        id: checksum
+        shell: pwsh
+        run: |
+          $file = Get-Item build/android/arm64-v8a/release/*.so | Select-Object -First 1
+          $sha = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+          $date = $file.LastWriteTimeUtc.ToString("yyyy-MM-dd HH:mm:ss UTC")
+          echo "so_sha=$sha" >> $env:GITHUB_OUTPUT
+          echo "so_date=$date" >> $env:GITHUB_OUTPUT
+
+      - name: Upload SO artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android
+          name: android-so
           path: build/android/arm64-v8a/release/*.so
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-android]
+    steps:
+      - name: Download DLL
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-dll
+          path: output
+
+      - name: Download SO
+        uses: actions/download-artifact@v4
+        with:
+          name: android-so
+          path: output
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: |
+            ## 📦 Build Checksums
+
+            | 文件 | SHA256 | 构建时间 |
+            |------|--------|--------|
+            | `ForceCloseOreUI.dll` | `${{ needs.build-windows.outputs.dll_sha }}` | ${{ needs.build-windows.outputs.dll_date }} |
+            | `ForceCloseOreUI.so`  | `${{ needs.build-android.outputs.so_sha }}`  | ${{ needs.build-android.outputs.so_date }}  |
+          files: output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
