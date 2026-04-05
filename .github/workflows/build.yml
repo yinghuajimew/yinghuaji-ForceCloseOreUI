@@ -78,6 +78,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     needs: [build-windows, build-android]
+    permissions:
+      contents: write
     steps:
       - name: Download DLL
         uses: actions/download-artifact@v4
