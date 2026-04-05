@@ -191,6 +191,100 @@ bool testDirWritable(const std::string &dir) {
   return ok;
 }
 
+// 读取文件内容为字符串
+static std::string readFile(const std::string &path) {
+  std::ifstream f(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+}
+
+// 读取快照哈希（上次同步后保存的内容）
+static std::string readSnapshot(const std::string &snapshotPath) {
+  std::ifstream f(snapshotPath, std::ios::binary);
+  if (!f.is_open()) return "";
+  return std::string((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+}
+
+// 保存快照
+static void writeSnapshot(const std::string &snapshotPath,
+                           const std::string &content) {
+  std::error_code ec;
+  fs::create_directories(fs::path(snapshotPath).parent_path(), ec);
+  std::ofstream f(snapshotPath, std::ios::binary);
+  f.write(content.data(), content.size());
+}
+
+// 同步两个路径的 config.json，哪个有改动就覆盖另一个
+// pathA = 新路径（Stivusik），pathB = 旧路径（QYCottage）
+void syncConfigPaths(const std::string &pathA, const std::string &pathB) {
+  std::error_code ec;
+  // 快照保存在新路径目录下
+  const std::string snapshotPath =
+      fs::path(pathA).parent_path().string() + "/.config_snapshot";
+
+  bool existsA = fs::exists(pathA, ec);
+  bool existsB = fs::exists(pathB, ec);
+
+  if (!existsA && !existsB)
+    return;
+
+  if (existsA && !existsB) {
+    fs::create_directories(fs::path(pathB).parent_path(), ec);
+    fs::copy_file(pathA, pathB, fs::copy_options::overwrite_existing, ec);
+    writeSnapshot(snapshotPath, readFile(pathA));
+    return;
+  }
+
+  if (!existsA && existsB) {
+    fs::create_directories(fs::path(pathA).parent_path(), ec);
+    fs::copy_file(pathB, pathA, fs::copy_options::overwrite_existing, ec);
+    writeSnapshot(snapshotPath, readFile(pathB));
+    return;
+  }
+
+  // 两个都存在
+  auto timeA = fs::last_write_time(pathA, ec);
+  auto timeB = fs::last_write_time(pathB, ec);
+
+  if (timeA > timeB) {
+    // A 更新，A 覆盖 B
+    fs::copy_file(pathA, pathB, fs::copy_options::overwrite_existing, ec);
+    writeSnapshot(snapshotPath, readFile(pathA));
+  } else if (timeB > timeA) {
+    // B 更新，B 覆盖 A
+    fs::copy_file(pathB, pathA, fs::copy_options::overwrite_existing, ec);
+    writeSnapshot(snapshotPath, readFile(pathB));
+  } else {
+    // 时间相同，读取内容和快照对比，判断哪一侧被修改
+    std::string contentA  = readFile(pathA);
+    std::string contentB  = readFile(pathB);
+    std::string snapshot  = readSnapshot(snapshotPath);
+
+    if (contentA == contentB) {
+      // 内容完全一致，无需操作
+      return;
+    }
+
+    bool aChanged = (contentA != snapshot);
+    bool bChanged = (contentB != snapshot);
+
+    if (aChanged && !bChanged) {
+      // 只有 A 改了，A 覆盖 B
+      fs::copy_file(pathA, pathB, fs::copy_options::overwrite_existing, ec);
+      writeSnapshot(snapshotPath, contentA);
+    } else if (!aChanged && bChanged) {
+      // 只有 B 改了，B 覆盖 A
+      fs::copy_file(pathB, pathA, fs::copy_options::overwrite_existing, ec);
+      writeSnapshot(snapshotPath, contentB);
+    } else {
+      // 两侧都改了（冲突），以 A（新路径）为准
+      fs::copy_file(pathA, pathB, fs::copy_options::overwrite_existing, ec);
+      writeSnapshot(snapshotPath, contentA);
+    }
+  }
+}
+
 std::string getConfigDir() {
 #if defined(_WIN32)
   std::string primary = "mods/ForceCloseOreUI/";
@@ -199,21 +293,29 @@ std::string getConfigDir() {
     return fallback;
   return primary;
 #else
-  std::string primary = "/storage/emulated/0/Android/data/com.mojang.minecraftpe";
-  if (!primary.empty()) {
-    primary += "/ForceCloseOreUI/";
-    if (testDirWritable(primary))
-      return primary;
-  }
+  // 新路径（Stivusik）
+  std::string newPath = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/ForceCloseOreUI/";
+  // 旧路径（QYCottage 原始）绝对路径
+  std::string oldPath = "/storage/emulated/0/games/ForceCloseOreUI/";
+
+  // 同步两个路径的配置文件
+  syncConfigPaths(newPath + "config.json", oldPath + "config.json");
+
+  // 优先使用新路径，不可写则回退旧路径
+  if (testDirWritable(newPath))
+    return newPath;
+  if (testDirWritable(oldPath))
+    return oldPath;
+
   if (!env)
-    return primary;
+    return newPath;
   std::string base = GetModsFilesPath(env);
   if (!base.empty()) {
     base += "/ForceCloseOreUI/";
     if (testDirWritable(base))
       return base;
   }
-  return primary;
+  return newPath;
 #endif
 }
 nlohmann::json outputJson;
