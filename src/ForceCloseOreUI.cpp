@@ -295,8 +295,8 @@ std::string getConfigDir() {
 #else
   // 新路径（Stivusik）
   std::string newPath = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/ForceCloseOreUI/";
-  // 旧路径（QYCottage 原始）绝对路径
-  std::string oldPath = "/storage/emulated/0/games/ForceCloseOreUI/";
+  // 旧路径（QYCottage 原始）
+  std::string oldPath = "/sdcard/games/ForceCloseOreUI/";
 
   // 同步两个路径的配置文件
   syncConfigPaths(newPath + "config.json", oldPath + "config.json");
