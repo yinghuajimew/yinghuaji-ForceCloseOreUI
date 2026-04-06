@@ -199,7 +199,7 @@ std::string getConfigDir() {
     return fallback;
   return primary;
 #else
-  std::string primary = "/storage/emulated/0/Android/data/com.mojang.minecraftpe";
+  std::string primary = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/mods/";
   if (!primary.empty()) {
     primary += "/ForceCloseOreUI/";
     if (testDirWritable(primary))
