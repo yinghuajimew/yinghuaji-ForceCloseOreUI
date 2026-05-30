@@ -199,19 +199,21 @@ std::string getConfigDir() {
     return fallback;
   return primary;
 #else
-  // 优先使用动态获取的路径
-  if (env) {
-    std::string base = GetModsFilesPath(env);
-    if (!base.empty()) {
-      base += "/ForceCloseOreUI/";
-      if (testDirWritable(base))
-        return base;
-    }
+  std::string primary = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/mods/";
+  if (!primary.empty()) {
+    primary += "/ForceCloseOreUI/";
+    if (testDirWritable(primary))
+      return primary;
   }
-  
-  // 回退到硬编码路径
-  std::string fallback = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/mods/ForceCloseOreUI/";
-  return fallback;
+  if (!env)
+    return primary;
+  std::string base = GetModsFilesPath(env);
+  if (!base.empty()) {
+    base += "/ForceCloseOreUI/";
+    if (testDirWritable(base))
+      return base;
+  }
+  return primary;
 #endif
 }
 nlohmann::json outputJson;
