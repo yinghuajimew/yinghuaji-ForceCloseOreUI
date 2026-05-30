@@ -97,7 +97,7 @@ public:
 #endif
 
 // ------------------------------------------------------------
-// 智能模块定位
+// 智能模块定位（用于日志记录，不用于Hook）
 // ------------------------------------------------------------
 struct ModuleInfo {
     uintptr_t base;
@@ -137,81 +137,6 @@ static bool findMinecraftSegment(ModuleInfo& out) {
     }
 
     fclose(fp);
-    return false;
-}
-
-// ------------------------------------------------------------
-// 内存扫描（自验证用）
-// ------------------------------------------------------------
-static uintptr_t ResolveSignature(const ModuleInfo& mod, const char* sig) {
-    std::vector<int> pattern;
-    const char* p = sig;
-    while (*p) {
-        if (*p == ' ') { p++; continue; }
-        if (*p == '?') { pattern.push_back(-1); p++; if (*p == '?') p++; continue; }
-        pattern.push_back(strtol(p, nullptr, 16));
-        p += 2;
-    }
-
-    if (mod.size < pattern.size()) return 0;
-    uint8_t* base = (uint8_t*)mod.base;
-    for (size_t i = 0; i <= mod.size - pattern.size(); i += 4) {
-        bool found = true;
-        for (size_t j = 0; j < pattern.size(); j++) {
-            if (pattern[j] != -1 && base[i + j] != (uint8_t)pattern[j]) {
-                found = false;
-                break;
-            }
-        }
-        if (found) return (uintptr_t)(base + i);
-    }
-    return 0;
-}
-
-// ------------------------------------------------------------
-// 自验证 Hook 安装
-// ------------------------------------------------------------
-static volatile bool g_hookValid = false;
-
-template<typename OrigPtr>
-static bool tryHookGroup(const ModuleInfo& mod, const std::vector<const char*>& sigs,
-                         void* detour, OrigPtr** orig_out,
-                         const char* label) {
-    for (size_t i = 0; i < sigs.size(); i++) {
-        LOGI("  Trying %s [%zu/%zu]...", label, i + 1, sigs.size());
-        uintptr_t addr = ResolveSignature(mod, sigs[i]);
-        if (addr == 0) {
-            LOGI("  %s [%zu] -> not found.", label, i + 1);
-            continue;
-        }
-
-        // 重置自验证标志
-        g_hookValid = false;
-
-        // 使用DobbyHook进行Hook
-        if (DobbyHook((void*)addr, detour, (void**)orig_out) != 0) {
-            LOGE("  DobbyHook failed at 0x%lx", addr);
-            continue;
-        }
-
-        LOGI("  DobbyHook installed. Triggering validation...");
-
-        // 等待验证
-        for (int w = 0; w < 20; w++) {
-            if (g_hookValid) break;
-            usleep(100 * 1000);
-        }
-
-        if (g_hookValid) {
-            LOGI("  %s [%zu] -> VALID hook! Confirmed correct function.", label, i + 1);
-            return true;
-        }
-
-        // 卸载错误的Hook
-        LOGE("  %s [%zu] -> INVALID hook (validation failed). Unhooking and trying next...", label, i + 1);
-        DobbyDestroy((void*)addr);
-        *orig_out = nullptr;
-    }
     return false;
 }
 
@@ -457,7 +382,6 @@ static void applyConfig(OreUi& ore_ui, const char* label) {
         return;
     }
 
-    g_hookValid = true;
     LOGI("[%s] Valid! Found %zu OreUI configs.", label, map_size);
 
     std::string configPath = getConfigDir() + "config.json";
@@ -527,7 +451,7 @@ SKY_AUTO_STATIC_HOOK(
 }
 #endif
 
-// OreUI Hook（带自验证）
+// OreUI Hook
 SKY_AUTO_STATIC_HOOK(Hook2, memory::HookPriority::Normal, OREUI_PATTERN, void,
                      void *a1, void *a2, void *a3, void *a4, void *a5, void *a6,
                      void *a7, void *a8, void *a9, OreUi &a10, void *a11) {
@@ -592,7 +516,7 @@ static std::string getConfigDir() {
 }
 
 // ------------------------------------------------------------
-// 注入线程（自验证Hook安装）
+// 注入线程（用于初始化和模块检测）
 // ------------------------------------------------------------
 static void* InjectionThread(void*) {
     LOGI("=== Background thread STARTED (tid=%d) ===", gettid());
@@ -616,8 +540,6 @@ static void* InjectionThread(void*) {
         return nullptr;
     }
     
-    // 这里可以添加自验证Hook安装逻辑
-    // 但由于SKY_AUTO_STATIC_HOOK已经处理了Hook，这里主要用于初始化
     LOGI("Module found, hooks should be active.");
     return nullptr;
 }
@@ -645,7 +567,7 @@ static void ForceCloseOreUI_Init() {
         else pthread_detach(logcat_thread);
     }
     
-    // 启动注入线程（如果需要自验证Hook）
+    // 启动注入线程（用于模块检测）
     {
         pthread_t thread;
         int ret = pthread_create(&thread, nullptr, InjectionThread, nullptr);
