@@ -379,12 +379,19 @@ std::vector<fs::path> getConfigDirCandidates() {
   appendUniquePath(paths, getUWPModsDir());
   appendUniquePath(paths, fs::path("mods") / kModDirName);
 #else
-#if __arm__ || __aarch64__
-  JNIEnv *current_env = getCurrentJNIEnv();
-  if (current_env) {
-    std::string mods_path = GetModsFilesPath(current_env);
-    if (!mods_path.empty())
-      appendUniquePath(paths, fs::path(mods_path) / kModDirName);
+  std::string primary = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/mods/";
+  if (!primary.empty()) {
+    primary += "/ForceCloseOreUI/";
+    if (testDirWritable(primary))
+      return primary;
+  }
+  if (!env)
+    return primary;
+  std::string base = GetModsFilesPath(env);
+  if (!base.empty()) {
+    base += "/ForceCloseOreUI/";
+    if (testDirWritable(base))
+      return base;
   }
 #endif
   appendUniquePath(paths, fs::path("/sdcard/games") / kModDirName);
