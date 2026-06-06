@@ -16,14 +16,6 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-#if _WIN32
-
-#include <shlobj.h>
-#include <string>
-#include <vector>
-#include <windows.h>
-
-#endif
 
 #if __arm__
 #include <unistd.h>
@@ -265,23 +257,14 @@ public:
 #elif __aarch64__
 #define OREUI_PATTERN                                                                     \
      std::initializer_list<const char *>({                                                \
-      "? ? ? D1 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? 91 ? ? ? D5 FB 03 03 2A F8 03 02 2A", \
+      "? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 FD 03 00 91 ? ? ? D1 ? ? ? D5 FA 03 00 AA F5 03 07 AA", \
+      "? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 FD 03 00 91 ? ? ? D1 ? ? ? D5 FB 03 00 AA F5 03 07 AA", \
+      "? ? ? D1 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? 91 ? ? ? F9 ? ? ? D5 FB 03 00 AA ? ? ? F9 F5 03 07 AA", \
+      "? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 FD 03 00 91 ? ? ? D1 ? ? ? D5 FA 03 00 AA F6 03 07 AA", \
+      "? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 FD 03 00 91 ? ? ? D1 ? ? ? D5 FA 03 00 AA F5 03 07 AA" \
   })                                                                                                                    \
 
-#elif _WIN32
-
-#include <shlobj.h>
-#include <string>
-#include <vector>
-#include <windows.h>
-
-
-#define OREUI_PATTERN                                                                                                    \
-     std::initializer_list<const char *>({                                                                               \
-    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC D8 01 00 00 48 8D AC 24 ? ? ? ? 48 C7 85 ? ? ? ? ? ? ? ? 45 89 CE", \
-  })                                                                                                 \
-
- #endif
+#endif
 
 // clang-format on
 
@@ -292,30 +275,8 @@ using Json = nlohmann::json;
 constexpr char kConfigFileName[] = "config.json";
 constexpr char kModDirName[] = "ForceCloseOreUI";
 
-#if defined(_WIN32)
-
-std::string getMinecraftModsPath() {
-  char appDataPath[MAX_PATH];
-  if (FAILED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appDataPath))) {
-    printf("Failed to get APPDATA path.\n");
-    return "";
-  }
-
-  std::string path = std::string(appDataPath) + "\\Minecraft Bedrock\\mods";
-  return path;
-}
-
-std::string getUWPModsDir() {
-  std::string appDataPath = getMinecraftModsPath();
-  std::string uwpMods = appDataPath + "\\ForceCloseOreUI\\";
-  return uwpMods;
-}
-#endif
-
 void logConfigInfo(const std::string &message) {
-#if defined(_WIN32)
-  std::printf("[ForceCloseOreUI] %s\n", message.c_str());
-#elif __arm__ || __aarch64__
+#if __arm__ || __aarch64__
   LOGI("%s", message.c_str());
 #else
   std::printf("[ForceCloseOreUI] %s\n", message.c_str());
@@ -323,9 +284,7 @@ void logConfigInfo(const std::string &message) {
 }
 
 void logConfigError(const std::string &message) {
-#if defined(_WIN32)
-  std::printf("[ForceCloseOreUI] %s\n", message.c_str());
-#elif __arm__ || __aarch64__
+#if __arm__ || __aarch64__
   LOGE("%s", message.c_str());
 #else
   std::printf("[ForceCloseOreUI] %s\n", message.c_str());
@@ -375,28 +334,28 @@ bool isDirectoryWritable(const fs::path &dir) {
 
 std::vector<fs::path> getConfigDirCandidates() {
   std::vector<fs::path> paths;
-#if defined(_WIN32)
-  appendUniquePath(paths, getUWPModsDir());
-  appendUniquePath(paths, fs::path("mods") / kModDirName);
-#else
+  
+#if __arm__ || __aarch64__
   std::string primary = "/storage/emulated/0/Android/data/com.mojang.minecraftpe/mods/";
   if (!primary.empty()) {
     primary += "/ForceCloseOreUI/";
-    if (testDirWritable(primary))
-      return primary;
+    if (isDirectoryWritable(primary))
+      appendUniquePath(paths, primary);
   }
-  if (!env)
-    return primary;
-  std::string base = GetModsFilesPath(env);
-  if (!base.empty()) {
-    base += "/ForceCloseOreUI/";
-    if (testDirWritable(base))
-      return base;
+  
+  if (env) {
+    std::string base = GetModsFilesPath(env);
+    if (!base.empty()) {
+      base += "/ForceCloseOreUI/";
+      if (isDirectoryWritable(base))
+        appendUniquePath(paths, base);
+    }
   }
-#endif
+  
   appendUniquePath(paths, fs::path("/sdcard/games") / kModDirName);
   appendUniquePath(paths, fs::path("/storage/emulated/0/games") / kModDirName);
 #endif
+  
   return paths;
 }
 
