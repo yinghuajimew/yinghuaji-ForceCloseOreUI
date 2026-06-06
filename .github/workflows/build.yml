@@ -1,4 +1,4 @@
-name: Build 1.26.12
+name: Build so
 
 on:
   push:
@@ -8,38 +8,6 @@ on:
       - '**'
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-    outputs:
-      dll_sha: ${{ steps.checksum.outputs.dll_sha }}
-      dll_date: ${{ steps.checksum.outputs.dll_date }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup xmake
-        uses: xmake-io/github-action-setup-xmake@v1
-
-      - name: Build for Windows (DLL)
-        run: |
-          xmake f -p windows -m release -v -y
-          xmake
-
-      - name: Compute checksum and date
-        id: checksum
-        shell: pwsh
-        run: |
-          $file = Get-Item build/windows/x64/release/*.dll | Select-Object -First 1
-          $sha = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
-          $date = $file.LastWriteTimeUtc.ToString("yyyy-MM-dd HH:mm:ss UTC")
-          echo "dll_sha=$sha" >> $env:GITHUB_OUTPUT
-          echo "dll_date=$date" >> $env:GITHUB_OUTPUT
-
-      - name: Upload DLL artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-dll
-          path: build/windows/x64/release/*.dll
-
   build-android:
     runs-on: windows-latest
     outputs:
@@ -77,16 +45,10 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: [build-windows, build-android]
+    needs: [build-android]
     permissions:
       contents: write
     steps:
-      - name: Download DLL
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-dll
-          path: output
-
       - name: Download SO
         uses: actions/download-artifact@v4
         with:
@@ -103,7 +65,6 @@ jobs:
 
             | 文件 | SHA256 | 构建时间 |
             |------|--------|--------|
-            | `ForceCloseOreUI.dll` | `${{ needs.build-windows.outputs.dll_sha }}` | ${{ needs.build-windows.outputs.dll_date }} |
             | `ForceCloseOreUI.so`  | `${{ needs.build-android.outputs.so_sha }}`  | ${{ needs.build-android.outputs.so_date }}  |
           files: output/*
         env:
