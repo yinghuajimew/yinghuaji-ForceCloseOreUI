@@ -19,8 +19,11 @@ jobs:
       - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@v1
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
 
       - name: Build for Android (SO)
         run: |
