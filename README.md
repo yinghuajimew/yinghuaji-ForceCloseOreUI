@@ -13,10 +13,6 @@ using the <code>libpreloader.so</code> loader.</p>
 
 <br/>
 
-> [!WARNING]
-> Unofficial mod. Not affiliated with Mojang or Microsoft. Modding Minecraft is against the
-> Minecraft Terms of Service and can get your account banned. Use at your own risk.
-
 > [!IMPORTANT]
 > **This is the dependency variant. Most people want the standalone one, or just the app.**
 > - Easiest: the one-tap app — **<https://github.com/yinghuajimew/yhjmew.no.ore.ui>**

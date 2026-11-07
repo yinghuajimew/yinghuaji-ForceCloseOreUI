@@ -13,10 +13,6 @@
 
 <br/>
 
-> [!WARNING]
-> 非官方 Mod，与 Mojang、微软无关。修改客户端违反 Minecraft 使用条款，账号可能被封。
-> 请自行承担风险。
-
 > [!IMPORTANT]
 > **这是依赖版。多数人其实想要独立版，或者干脆用 App。**
 > - 最省事：一键打包 App —— **<https://github.com/yinghuajimew/yhjmew.no.ore.ui>**
