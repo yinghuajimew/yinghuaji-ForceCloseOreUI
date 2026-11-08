@@ -23,7 +23,10 @@ target("ForceCloseOreUI")
         add_syslinks("Shell32")
     elseif is_plat("android") then
         remove_files("src/api/memory/win/**.cpp","src/api/memory/win/**.h")
-        add_cxflags("-O3")
+        -- z: mc_version.h 解压 APK 里的 AndroidManifest.xml（libz 在 NDK sysroot 里）
+        -- -fno-omit-frame-pointer: 崩溃回溯靠 x29 链，-O3 默认会省掉
+        add_cxflags("-O3", "-fno-omit-frame-pointer")
+        add_syslinks("z")
         add_packages("preloader_android")
         add_cxxflags("-DLLVM_TARGETS_TO_BUILD=\"ARM;AArch64;BPF\"")
     end

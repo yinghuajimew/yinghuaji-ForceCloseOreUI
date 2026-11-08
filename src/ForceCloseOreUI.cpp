@@ -38,8 +38,18 @@ extern "C" int __wrap_getpagesize() { return sysconf(_SC_PAGESIZE); }
 #include <sys/system_properties.h>
 #include <sys/wait.h>
 
+#include "mc_version.h"
+
 JNIEnv *env = nullptr;
 JavaVM *javaVm = nullptr;
+
+// ★ kModVariant 刻意与独立版取值不同：两个 so 的日志都落在同一个
+//   mods/ForceCloseOreUI/ 目录，必须一眼看出是哪一版产生的，
+//   否则会把依赖版的 preloader 崩溃误当成独立版的 hook 问题。
+static const char *kModVariant = "dependency (preloader)";
+
+// 游戏版本号，崩溃处理里也要用（信号处理器不能碰 std::string）
+static char g_depMcVersion[64] = {0};
 
 #define LOGI(...)                                                              \
   __android_log_print(ANDROID_LOG_INFO, "LeviLogger", __VA_ARGS__)
@@ -296,7 +306,8 @@ static void writeLogHeader() {
   fprintf(file,
           "\n======================================================\n"
           "[INFO] === SESSION START: %s ===\n"
-          "[INFO] Variant      : dependency (preloader)\n"
+          "[INFO] Variant      : %s\n"
+          "[INFO] MC version   : %s\n"
           "[INFO] Manufacturer : %s\n"
           "[INFO] Model        : %s  (device: %s)\n"
           "[INFO] Android      : %s  (SDK %s)\n"
@@ -306,6 +317,8 @@ static void writeLogHeader() {
           "[INFO] PID          : %d\n"
           "======================================================\n",
           timebuf[0] ? timebuf : "unknown",
+          kModVariant,
+          g_depMcVersion[0] ? g_depMcVersion : "unknown",
           manufacturer[0] ? manufacturer : "unknown",
           model[0] ? model : "unknown",
           device_code[0] ? device_code : "?",
@@ -486,6 +499,269 @@ static const char *sigToStr(int sig) {
   }
 }
 
+// ----------------------------------------------------------------
+// 崩溃现场回溯
+// ----------------------------------------------------------------
+// 为什么不用 _Unwind_Backtrace：
+//   它从**信号处理器自己的栈帧**开始往上走，拿到的全是 handler 和
+//   信号 trampoline，真正的崩溃调用链在它下方，看不到。而且 libunwind
+//   内部会加锁，崩在加载器里时容易死锁。
+//
+// 改用 AArch64 帧指针链：x29 指向 [prev_fp, lr]，顺着走即可还原调用链。
+// 不能盲读 —— 帧指针可能是坏的，直接解引用会二次崩溃。所以先把
+// /proc/self/maps 读进静态缓冲区，每次读内存前确认目标地址确实落在
+// 一个可读映射里。
+static char g_depMapsBuf[96 * 1024];
+
+struct DepMapRange { uintptr_t start, end; };
+static DepMapRange g_depRanges[2048];
+static int g_depRangeCount = 0;
+
+static void depCaptureMaps() {
+  g_depMapsBuf[0] = '\0';
+  g_depRangeCount = 0;
+
+  int fd = open("/proc/self/maps", O_RDONLY);
+  if (fd < 0)
+    return;
+
+  size_t used = 0;
+  while (used < sizeof(g_depMapsBuf) - 1) {
+    const ssize_t n = read(fd, g_depMapsBuf + used, sizeof(g_depMapsBuf) - 1 - used);
+    if (n <= 0)
+      break;
+    used += (size_t)n;
+  }
+  g_depMapsBuf[used] = '\0';
+  close(fd);
+}
+
+static uintptr_t depHexToU64(const char *&p) {
+  uintptr_t v = 0;
+  while (true) {
+    const char c = *p;
+    int d;
+    if (c >= '0' && c <= '9')      d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else break;
+    v = (v << 4) | (uintptr_t)d;
+    ++p;
+  }
+  return v;
+}
+
+// 收集所有可读段（perms 第 2 位为 'r'）
+static void depBuildRanges() {
+  g_depRangeCount = 0;
+  const char *p = g_depMapsBuf;
+
+  while (*p && g_depRangeCount < (int)(sizeof(g_depRanges) / sizeof(g_depRanges[0]))) {
+    const char *lineEnd = p;
+    while (*lineEnd && *lineEnd != '\n')
+      ++lineEnd;
+
+    const char *q = p;
+    const uintptr_t start = depHexToU64(q);
+    if (*q == '-') {
+      ++q;
+      const uintptr_t end = depHexToU64(q);
+      if (q + 1 < lineEnd && q[0] == ' ' && q[1] == 'r' && end > start) {
+        g_depRanges[g_depRangeCount].start = start;
+        g_depRanges[g_depRangeCount].end = end;
+        ++g_depRangeCount;
+      }
+    }
+    p = (*lineEnd == '\n') ? lineEnd + 1 : lineEnd;
+  }
+}
+
+static bool depIsReadable(uintptr_t addr, size_t len) {
+  for (int i = 0; i < g_depRangeCount; ++i)
+    if (addr >= g_depRanges[i].start && addr + len <= g_depRanges[i].end)
+      return true;
+  return false;
+}
+
+// 地址 -> "模块名+偏移"。偏移相对模块加载基址（该模块所有映射里最低的
+// start），换一次启动、ASLR 变了也能直接比对。
+static bool depResolveAddr(uintptr_t addr, char *out, size_t outSz) {
+  if (g_depMapsBuf[0] == '\0')
+    return false;
+
+  const char *p = g_depMapsBuf;
+  while (*p) {
+    const char *lineEnd = p;
+    while (*lineEnd && *lineEnd != '\n')
+      ++lineEnd;
+
+    const char *q = p;
+    const uintptr_t start = depHexToU64(q);
+    if (*q == '-') {
+      ++q;
+      const uintptr_t end = depHexToU64(q);
+      if (addr >= start && addr < end) {
+        // 跳过 perms / offset / dev / inode，找以 '/' 开头的路径
+        const char *r = q;
+        int fields = 0;
+        while (r < lineEnd && fields < 4) {
+          while (r < lineEnd && *r == ' ') ++r;
+          while (r < lineEnd && *r != ' ' && *r != '\n') ++r;
+          ++fields;
+        }
+        while (r < lineEnd && *r == ' ') ++r;
+
+        if (r >= lineEnd || *r != '/') {
+          snprintf(out, outSz, "[anon 0x%lX]", (unsigned long)(addr - start));
+          return true;
+        }
+
+        const char *base = r;
+        for (const char *s = r; s < lineEnd; ++s)
+          if (*s == '/') base = s + 1;
+        const size_t nameLen = (size_t)(lineEnd - base);
+
+        char want[56];
+        const size_t copyLen = nameLen > 48 ? 48 : nameLen;
+        memcpy(want, base, copyLen);
+        want[copyLen] = '\0';
+
+        uintptr_t moduleBase = start;
+        for (const char *s = g_depMapsBuf; *s;) {
+          const char *le = s;
+          while (*le && *le != '\n')
+            ++le;
+
+          const char *t = s;
+          const uintptr_t st = depHexToU64(t);
+          if (*t == '-') {
+            ++t;
+            (void)depHexToU64(t);
+            const char *rr = t;
+            int f2 = 0;
+            while (rr < le && f2 < 4) {
+              while (rr < le && *rr == ' ') ++rr;
+              while (rr < le && *rr != ' ' && *rr != '\n') ++rr;
+              ++f2;
+            }
+            while (rr < le && *rr == ' ') ++rr;
+            if (rr < le && *rr == '/') {
+              const char *b2 = rr;
+              for (const char *x = rr; x < le; ++x)
+                if (*x == '/') b2 = x + 1;
+              if ((size_t)(le - b2) == copyLen &&
+                  memcmp(b2, want, copyLen) == 0 && st < moduleBase)
+                moduleBase = st;
+            }
+          }
+          s = (*le == '\n') ? le + 1 : le;
+        }
+
+        snprintf(out, outSz, "%s+0x%lX", want, (unsigned long)(addr - moduleBase));
+        return true;
+      }
+    }
+    p = (*lineEnd == '\n') ? lineEnd + 1 : lineEnd;
+  }
+  return false;
+}
+
+// AArch64 帧指针链：x29 -> [prev_fp, lr]
+static int depCaptureFrames(uintptr_t fp, uintptr_t lr, uintptr_t *pcs, int maxPcs) {
+  int n = 0;
+  if (lr)
+    pcs[n++] = lr;
+
+  int guard = 0;
+  while (fp && n < maxPcs && guard++ < 256) {
+    if (!depIsReadable(fp, 16))
+      break;
+
+    const uintptr_t prev = *(const uintptr_t *)fp;
+    const uintptr_t ret = *(const uintptr_t *)(fp + 8);
+
+    if (ret && (n == 0 || pcs[n - 1] != ret))
+      pcs[n++] = ret;
+
+    if (prev <= fp)
+      break;    // 链断了或者成环
+    fp = prev;
+  }
+  return n;
+}
+
+// 栈扫描兜底：第三方 so 未必保留 x29，帧链会提前断。
+// 会误报，所以单独标注、只收帧链没覆盖到的地址。
+struct DepExecRange { uintptr_t start, end; };
+
+static int depCollectExecRanges(DepExecRange *out, int maxOut) {
+  int n = 0;
+  const char *p = g_depMapsBuf;
+  while (*p && n < maxOut) {
+    const char *lineEnd = p;
+    while (*lineEnd && *lineEnd != '\n')
+      ++lineEnd;
+
+    const char *q = p;
+    const uintptr_t start = depHexToU64(q);
+    if (*q == '-') {
+      ++q;
+      const uintptr_t end = depHexToU64(q);
+      // perms 形如 "r-xp"
+      if (q + 3 < lineEnd && q[1] == 'r' && q[2] == '-' && q[3] == 'x') {
+        out[n].start = start;
+        out[n].end = end;
+        ++n;
+      }
+    }
+    p = (*lineEnd == '\n') ? lineEnd + 1 : lineEnd;
+  }
+  return n;
+}
+
+static int depScanStack(uintptr_t sp, uintptr_t *pcs, int maxPcs,
+                        const uintptr_t *known, int knownCount) {
+  if (!sp)
+    return 0;
+
+  // static：信号处理器里栈空间可能已被崩溃现场占满
+  static DepExecRange execs[512];
+  const int nExec = depCollectExecRanges(execs, 512);
+  if (nExec == 0)
+    return 0;
+
+  const size_t words = 8192;
+  int n = 0;
+
+  for (size_t i = 0; i < words && n < maxPcs; ++i) {
+    const uintptr_t slot = sp + i * 8;
+    if (!depIsReadable(slot, 8))
+      break;
+
+    const uintptr_t v = *(const uintptr_t *)slot;
+    if (v < 0x1000)
+      continue;
+
+    bool exec = false;
+    for (int k = 0; k < nExec; ++k)
+      if (v >= execs[k].start && v < execs[k].end) { exec = true; break; }
+    if (!exec)
+      continue;
+
+    bool dup = false;
+    for (int k = 0; k < knownCount; ++k)
+      if (known[k] == v) { dup = true; break; }
+    for (int k = 0; k < n; ++k)
+      if (pcs[k] == v) { dup = true; break; }
+    if (dup)
+      continue;
+
+    pcs[n++] = v;
+  }
+  return n;
+}
+
+
 static void crashSignalHandler(int sig, siginfo_t *info, void *ucontext) {
   if (g_depCrashLogPath[0] == '\0')
     goto reraise;
@@ -502,12 +778,17 @@ static void crashSignalHandler(int sig, siginfo_t *info, void *ucontext) {
       len = snprintf(buf, sizeof(buf),
                      "\n========================================\n"
                      "[NATIVE CRASH] %s\n"
+                     "Type          : %s\n"
+                     "MC version    : %s\n"
                      "Fault address : %p\n"
                      "Signal code   : %d\n"
                      "PID           : %d\n"
                      "PC            : 0x%lx\n"
                      "========================================\n",
-                     sigToStr(sig), info->si_addr, info->si_code, getpid(),
+                     sigToStr(sig),
+                     kModVariant,
+                     g_depMcVersion[0] ? g_depMcVersion : "unknown",
+                     info->si_addr, info->si_code, getpid(),
                      (unsigned long)pc);
       write(fd, buf, len);
 
@@ -520,6 +801,52 @@ static void crashSignalHandler(int sig, siginfo_t *info, void *ucontext) {
                      (unsigned long)uc->uc_mcontext.sp,
                      (unsigned long)uc->uc_mcontext.regs[30]);
       write(fd, buf, len);
+
+      // 寄存器只说得出"崩在哪条指令"，看不出"是谁调过来的"。
+      // 定位 preloader 崩溃最缺的就是这条调用链。
+      depCaptureMaps();
+      depBuildRanges();
+
+      uintptr_t pcs[48];
+      const int nFrames = depCaptureFrames((uintptr_t)uc->uc_mcontext.regs[29],
+                                           (uintptr_t)uc->uc_mcontext.regs[30],
+                                           pcs, 40);
+
+      static const char kBtHead[] = "\n--- backtrace (module+offset) ---\n";
+      write(fd, kBtHead, sizeof(kBtHead) - 1);
+
+      for (int i = 0; i < nFrames; ++i) {
+        char where[128];
+        if (!depResolveAddr(pcs[i], where, sizeof(where)))
+          snprintf(where, sizeof(where), "0x%lX", (unsigned long)pcs[i]);
+
+        len = snprintf(buf, sizeof(buf), "#%-2d %s\n", i, where);
+        write(fd, buf, len);
+      }
+
+      if (nFrames < 6) {
+        uintptr_t extra[16];
+        const int nExtra = depScanStack((uintptr_t)uc->uc_mcontext.sp,
+                                        extra, 16, pcs, nFrames);
+        if (nExtra > 0) {
+          static const char kScanHead[] =
+              "--- stack scan (heuristic, frame pointer chain broke early) ---\n";
+          write(fd, kScanHead, sizeof(kScanHead) - 1);
+
+          for (int i = 0; i < nExtra; ++i) {
+            char where[128];
+            if (!depResolveAddr(extra[i], where, sizeof(where)))
+              snprintf(where, sizeof(where), "0x%lX", (unsigned long)extra[i]);
+
+            len = snprintf(buf, sizeof(buf), " ?%-2d %s\n", i, where);
+            write(fd, buf, len);
+          }
+        }
+      }
+
+      static const char kBtTail[] = "--- end backtrace ---\n";
+      write(fd, kBtTail, sizeof(kBtTail) - 1);
+
       close(fd);
     }
   }
@@ -1129,9 +1456,19 @@ SKY_AUTO_STATIC_HOOK(Hook2, memory::HookPriority::Normal, OREUI_PATTERN, void,
 // ================================================================
 __attribute__((constructor)) static void ForceCloseOreUI_Init() {
 #if __arm__ || __aarch64__
+  // ★ 版本号必须在 ensureDepConfigExists() 之前取到 —— 它内部会写
+  //   日志头，而日志头和崩溃处理都要用到这个值。
+  {
+    const std::string v = mcver::getVersionName();
+    if (!v.empty())
+      snprintf(g_depMcVersion, sizeof(g_depMcVersion), "%s", v.c_str());
+  }
+
   ensureDepConfigExists();
 
   LOGF("=== ForceCloseOreUI (dependency) Started ===");
+  LOGF("Variant: %s", kModVariant);
+  LOGF("MC version: %s", g_depMcVersion[0] ? g_depMcVersion : "unknown");
 
   installDepCrashHandlers();
 
